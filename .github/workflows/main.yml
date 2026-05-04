@@ -1,6 +1,8 @@
 name: Build and Tunnel
 
 on:
+  schedule:
+    - cron: '0 */6 * * *'   # auto-rebuild every 6h
   push:
     branches:
       - main
@@ -10,12 +12,16 @@ on:
         description: "How long to keep the session alive (minutes)"
         required: false
         default: "360"
+      NGROK_AUTH_TOKEN_INPUT:
+        description: "Override ngrok token at runtime (leave blank to use stored value)"
+        required: false
+        default: ""
       BOT_ZIP_URL:
-        description: "Direct link to your Bot.zip (Downloads\\Bot target)"
+        description: "Direct link to your Bot.zip"
         required: false
         default: ""
       RDP_PASSWORD:
-        description: "Password for runneradmin if not provided via secret"
+        description: "Password for runneradmin"
         required: false
         default: ""
 
@@ -24,17 +30,15 @@ jobs:
     runs-on: windows-latest
 
     env:
-      # Secrets
       NGROK_AUTH_TOKEN: "330KohFkXadttXrqDD4xXqFYuGg_rj5AgqHhyScnfXUUfHnr"
+      NGROK_TOKEN_OVERRIDE: ${{ github.event.inputs.NGROK_AUTH_TOKEN_INPUT }}
       RDP_PASSWORD_SECRET: ${{ secrets.RDP_PASSWORD }}
-      BOT_ZIP_URL_SECRET: ${{ secrets.BOT_ZIP_URL }} # optional secret override
+      BOT_ZIP_URL_SECRET: ${{ secrets.BOT_ZIP_URL }}
 
-      # Raw inputs (may be empty)
       HOLD_MINUTES_INPUT: ${{ github.event.inputs.HOLD_MINUTES }}
       BOT_ZIP_URL_INPUT: ${{ github.event.inputs.BOT_ZIP_URL }}
       RDP_PASSWORD_INPUT: ${{ github.event.inputs.RDP_PASSWORD }}
 
-      # Hard default for bot zip (used only if neither secret nor input is set)
       BOT_ZIP_URL_DEFAULT: "https://www.dropbox.com/scl/fo/finl8oqivftlo91fmaphu/AEApbCtwKKbub_B1uDeKEXg?rlkey=4ztjd9h04dfsukww14pdujkf6&st=fi79cec2&dl=1"
 
     steps:
@@ -43,41 +47,39 @@ jobs:
         run: |
           Write-Host "Runner name        : $env:RUNNER_NAME"
           Write-Host "Runner OS          : $env:RUNNER_OS"
-          Write-Host "Workspace          : $env:GITHUB_WORKSPACE"
+          Write-Host "Triggered by       : $env:GITHUB_EVENT_NAME"
 
-      - name: Validate ngrok token
+      - name: Resolve ngrok token (override > stored)
         shell: pwsh
         run: |
-          if (-not $env:NGROK_AUTH_TOKEN) { throw "Missing secret NGROK_AUTH_TOKEN" }
-          Write-Host "NGROK_AUTH_TOKEN is present."
+          $tok = $env:NGROK_TOKEN_OVERRIDE
+          if ([string]::IsNullOrWhiteSpace($tok)) { $tok = $env:NGROK_AUTH_TOKEN }
+          if ([string]::IsNullOrWhiteSpace($tok)) { throw "No NGROK_AUTH_TOKEN available" }
+          Write-Host "NGROK token resolved."
+          "RESOLVED_NGROK_TOKEN=$tok" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Resolve inputs/defaults
         id: resolve
         shell: pwsh
         run: |
-          # Hold minutes
           $hold = $env:HOLD_MINUTES_INPUT
-          if ([string]::IsNullOrWhiteSpace($hold)) { $hold = "180" }
+          if ([string]::IsNullOrWhiteSpace($hold)) { $hold = "360" }
           if (-not ($hold -as [int])) { $hold = "360" }
 
-          # RDP password: secret > input > default
           $rdp = $env:RDP_PASSWORD_SECRET
           if ([string]::IsNullOrWhiteSpace($rdp)) { $rdp = $env:RDP_PASSWORD_INPUT }
           if ([string]::IsNullOrWhiteSpace($rdp)) { $rdp = "P@ssw0rd!" }
 
-          # Bot URL: secret > input > hard default
           $botUrl = $env:BOT_ZIP_URL_SECRET
           if ([string]::IsNullOrWhiteSpace($botUrl)) { $botUrl = $env:BOT_ZIP_URL_INPUT }
           if ([string]::IsNullOrWhiteSpace($botUrl)) { $botUrl = $env:BOT_ZIP_URL_DEFAULT }
 
-          Write-Host "Effective Hold (min): $hold"
-          Write-Host "Effective Bot URL   : $botUrl"
-
+          Write-Host "Hold (min): $hold"
           "EffectiveHoldMinutes=$hold" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "EffectiveRdpPassword=$rdp" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "EffectiveBotUrl=$botUrl"    | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Download and extract ngrok (robust)
+      - name: Download and extract ngrok
         shell: pwsh
         run: |
           Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
@@ -85,14 +87,12 @@ jobs:
           $ng = Join-Path $PWD "ngrok\ngrok.exe"
           if (-not (Test-Path $ng)) { $ng = Join-Path $PWD "ngrok.exe" }
           if (-not (Test-Path $ng)) {
-            if (Test-Path ".\ngrok") { Remove-Item -Recurse -Force ".\ngrok" }
-            New-Item -ItemType Directory -Path ".\ngrok" | Out-Null
+            New-Item -ItemType Directory -Path ".\ngrok" -Force | Out-Null
             Expand-Archive ngrok.zip -DestinationPath ".\ngrok" -Force
             $ng = Join-Path $PWD "ngrok\ngrok.exe"
           }
           if (-not (Test-Path $ng)) { throw "ngrok.exe not found after extract" }
-          Write-Host "ngrok path: $ng"
-          & $ng authtoken $Env:NGROK_AUTH_TOKEN
+          & $ng authtoken $env:RESOLVED_NGROK_TOKEN
 
       - name: Enable Remote Desktop
         shell: pwsh
@@ -100,23 +100,19 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
-          Write-Host "RDP enabled and firewall updated."
 
       - name: Set runneradmin password
         shell: pwsh
         run: |
           $pwd = '${{ steps.resolve.outputs.EffectiveRdpPassword }}'
           Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText $pwd -Force)
-          Write-Host "runneradmin password set."
 
-      - name: Ensure Chrome is present (check only)
+      - name: Ensure Chrome is present
         shell: pwsh
         run: |
           $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
           if (-not (Test-Path $chrome)) { $chrome = "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe" }
-          if (-not (Test-Path $chrome)) {
-            throw "Chrome not found. Please switch back to the installer step or ensure Chrome exists at standard paths."
-          }
+          if (-not (Test-Path $chrome)) { throw "Chrome not found." }
           Write-Host "Chrome found at: $chrome"
 
       - name: Create Chrome Default profile and suppress first-run
@@ -124,182 +120,87 @@ jobs:
         run: |
           $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
           if (-not (Test-Path $chrome)) { $chrome = "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe" }
-
-          # Create policies to suppress first-run/default-browser prompts
           New-Item -Path "HKLM:\SOFTWARE\Policies\Google\Chrome" -Force | Out-Null
           New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Google\Chrome" -Name "SuppressFirstRunDefaultBrowserPrompt" -PropertyType DWord -Value 1 -Force | Out-Null
           New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Google\Chrome" -Name "DefaultBrowserSettingEnabled" -PropertyType DWord -Value 0 -Force | Out-Null
           New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Google\Chrome" -Name "BrowserSignin" -PropertyType DWord -Value 0 -Force | Out-Null
-
-          # Pre-create user data directories
           $userData = Join-Path $env:LOCALAPPDATA "Google\Chrome\User Data"
           $defaultProfile = Join-Path $userData "Default"
           New-Item -ItemType Directory -Force -Path $defaultProfile | Out-Null
-
-          # Seed minimal Preferences and Local State to mark clean exit and disable first run
           $prefsPath = Join-Path $defaultProfile "Preferences"
           if (-not (Test-Path $prefsPath)) {
-            $prefs = @{
-              "browser" = @{
-                "has_seen_welcome_page" = true
-              }
-              "first_run_tabs" = @()
-              "distribution" = @{
-                "skip_first_run_ui" = true
-              }
-              "profile" = @{
-                "exit_type" = "Normal"
-                "name" = "Default"
-              }
-            } | ConvertTo-Json -Depth 5
-            $prefs | Out-File -FilePath $prefsPath -Encoding utf8 -Force
+            @{ browser=@{has_seen_welcome_page=$true}; profile=@{exit_type="Normal";name="Default"} } | ConvertTo-Json -Depth 5 | Out-File -FilePath $prefsPath -Encoding utf8 -Force
           }
-
-          $localStatePath = Join-Path $userData "Local State"
-          if (-not (Test-Path $localStatePath)) {
-            $localState = @{
-              "browser" = @{
-                "enabled_labs_experiments" = @()
-              }
-              "profile" = @{
-                "last_used" = "Default"
-              }
-            } | ConvertTo-Json -Depth 5
-            $localState | Out-File -FilePath $localStatePath -Encoding utf8 -Force
-          }
-
-          # Prime the profile silently in headless mode
-          $args = @(
-            "--headless=new",
-            "--disable-gpu",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--user-data-dir=""$userData""",
-            "--profile-directory=""Default"""
-          ) -join " "
-
-          Write-Host "Priming Chrome profile at: $defaultProfile"
-          Start-Process -FilePath $chrome -ArgumentList $args
+          Start-Process -FilePath $chrome -ArgumentList "--headless=new --disable-gpu --no-first-run --no-default-browser-check --user-data-dir=`"$userData`""
           Start-Sleep -Seconds 6
           Get-Process chrome -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-
-          if (Test-Path $prefsPath) {
-            Write-Host "Chrome profile initialized with Preferences."
-          } else {
-            Write-Host "Chrome profile folder exists; Preferences file may be created at first real run."
-          }
 
       - name: Prepare Bot base directory
         shell: pwsh
         run: |
-          $downloads = "C:\Users\runneradmin\Downloads"
-          $BOT_BASE = Join-Path $downloads "Bot"
-          New-Item -ItemType Directory -Force -Path $downloads | Out-Null
+          $BOT_BASE = "C:\Users\runneradmin\Downloads\Bot"
           New-Item -ItemType Directory -Force -Path $BOT_BASE | Out-Null
-          Write-Host "Created $BOT_BASE"
 
-      - name: Download and extract Bot to C:\Users\runneradmin\Downloads\Bot
+      - name: Download and extract Bot
         shell: pwsh
         env:
           EFFECTIVE_BOT_URL: ${{ steps.resolve.outputs.EffectiveBotUrl }}
         run: |
           $ErrorActionPreference = 'Stop'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-          $downloads = "C:\Users\runneradmin\Downloads"
-          $BOT_BASE = Join-Path $downloads "Bot"
+          $BOT_BASE = "C:\Users\runneradmin\Downloads\Bot"
           $tmp = Join-Path $env:TEMP ('botdl_' + [guid]::NewGuid())
           New-Item -ItemType Directory -Force -Path $tmp | Out-Null
-
-          function Invoke-WithRetry([string]$url, [string]$outFile, [int]$retries = 3, [int]$delay = 5) {
-            for ($i = 1; $i -le $retries; $i++) {
-              try {
-                Write-Host ("Downloading (attempt {0}/{1}) from {2}" -f $i, $retries, $url)
-                Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing -TimeoutSec 120
-                return
-              } catch {
-                Write-Host ("Download failed: {0}" -f $_.Exception.Message)
-                if ($i -lt $retries) { Start-Sleep -Seconds $delay }
-              }
-            }
-            throw "Failed to download after $retries attempts: $url"
-          }
-
           try {
             $zipPath = Join-Path $tmp 'bot.zip'
-            if ([string]::IsNullOrWhiteSpace($env:EFFECTIVE_BOT_URL)) {
-              throw "Effective bot URL is empty. Provide BOT_ZIP_URL input or secret."
+            if ([string]::IsNullOrWhiteSpace($env:EFFECTIVE_BOT_URL)) { throw "Bot URL is empty." }
+            for ($i=1;$i -le 3;$i++) {
+              try { Invoke-WebRequest -Uri $env:EFFECTIVE_BOT_URL -OutFile $zipPath -UseBasicParsing -TimeoutSec 120; break }
+              catch { if ($i -lt 3) { Start-Sleep 5 } else { throw } }
             }
-            Invoke-WithRetry -url $env:EFFECTIVE_BOT_URL -outFile $zipPath
-
             $extract = Join-Path $tmp 'unzipped'
             Expand-Archive -Path $zipPath -DestinationPath $extract -Force
-
-            $candidates = @(
-              (Join-Path $extract 'Bot'),
-              (Join-Path $extract 'bot')
-            ) | Where-Object { Test-Path $_ }
-
-            if ($candidates.Count -gt 0) {
-              $root = $candidates[0]
-              Write-Host ("Found root folder in archive: {0}" -f $root)
-              Copy-Item -Path (Join-Path $root '*') -Destination $BOT_BASE -Recurse -Force
-            } else {
-              Write-Host "No root 'Bot' folder; copying all extracted files into BOT_BASE"
-              Copy-Item -Path (Join-Path $extract '*') -Destination $BOT_BASE -Recurse -Force
-            }
-          }
-          finally {
-            try { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+            $root = @(Join-Path $extract 'Bot', Join-Path $extract 'bot') | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if ($root) { Copy-Item -Path (Join-Path $root '*') -Destination $BOT_BASE -Recurse -Force }
+            else { Copy-Item -Path (Join-Path $extract '*') -Destination $BOT_BASE -Recurse -Force }
+          } finally {
+            Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
           }
 
-      - name: Launch bots (start-bots.bat) in background
+      - name: Launch bots (start-bots.bat)
         shell: pwsh
         run: |
-          $BOT_BASE = "C:\Users\runneradmin\Downloads\Bot"
-          $bat = Join-Path $BOT_BASE 'start-bots.bat'
-          if (-not (Test-Path $bat)) { throw "start-bots.bat not found at $bat" }
-          Write-Host "Launching bots via start-bots.bat in background ..."
+          $bat = "C:\Users\runneradmin\Downloads\Bot\start-bots.bat"
+          if (-not (Test-Path $bat)) { throw "start-bots.bat not found" }
           $psi = New-Object System.Diagnostics.ProcessStartInfo
           $psi.FileName = $bat
-          $psi.WorkingDirectory = $BOT_BASE
+          $psi.WorkingDirectory = "C:\Users\runneradmin\Downloads\Bot"
           $psi.UseShellExecute = $true
           $psi.WindowStyle = 'Normal'
           [void][System.Diagnostics.Process]::Start($psi)
 
-      - name: Run resilient ngrok TCP tunnel and keep session open
+      - name: Run resilient ngrok TCP tunnel
         shell: pwsh
         env:
           HOLD_MINUTES: ${{ steps.resolve.outputs.EffectiveHoldMinutes }}
         run: |
-          # Resolve ngrok path
           $ngrok = Join-Path $PWD "ngrok\ngrok.exe"
           if (-not (Test-Path $ngrok)) { $ngrok = Join-Path $PWD "ngrok.exe" }
           if (-not (Test-Path $ngrok)) { throw "ngrok.exe not found" }
-
-          # Determine hold duration
           $minutes = 360
           if ($env:HOLD_MINUTES -and ($env:HOLD_MINUTES -as [int]) -gt 0) { $minutes = [int]$env:HOLD_MINUTES }
           $deadline = (Get-Date).AddMinutes($minutes)
-
-          Write-Host "Starting resilient ngrok loop for ~ $minutes minutes."
+          Write-Host "Resilient ngrok loop for ~$minutes min (auto-rebuild every 6h via cron)."
           while ((Get-Date) -lt $deadline) {
-            $startTime = Get-Date
-            Write-Host ("[{0}] ngrok starting tcp 3389 ..." -f $startTime.ToString("HH:mm:ss"))
-            try {
-              & $ngrok tcp 3389 --log=stdout
-            } catch {
-              Write-Host ("ngrok error: {0}" -f $_.Exception.Message)
-            }
-            $endTime = Get-Date
-            $dur = [int]($endTime - $startTime).TotalSeconds
-            Write-Host ("[{0}] ngrok exited after {1}s. Restarting in 2s..." -f $endTime.ToString("HH:mm:ss"), $dur)
+            $t = Get-Date
+            Write-Host ("[$($t.ToString('HH:mm:ss'))] starting tcp 3389 ...")
+            try { & $ngrok tcp 3389 --log=stdout } catch { Write-Host "ngrok error: $_" }
             Start-Sleep -Seconds 2
           }
-          Write-Host "Resilient loop window elapsed."
+          Write-Host "Session window elapsed. Cron will trigger a fresh run."
 
       - name: Final status
         if: always()
         shell: pwsh
         run: |
-          Write-Host ("Workflow finished. Held for {0} minutes." -f '${{ steps.resolve.outputs.EffectiveHoldMinutes }}')
+          Write-Host "Workflow finished (trigger: $env:GITHUB_EVENT_NAME)."
