@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+  schedule:
+    # Auto-restart every 6 hours
+    - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
       HOLD_MINUTES:
@@ -18,23 +21,30 @@ on:
         description: "Password for runneradmin if not provided via secret"
         required: false
         default: ""
+      NGROK_TOKEN:
+        description: "Override ngrok auth token (leave blank to use secret/default)"
+        required: false
+        default: ""
 
 jobs:
   build-job:
     runs-on: windows-latest
 
     env:
-      # Secrets
-      NGROK_AUTH_TOKEN: "330KohFkXadttXrqDD4xXqFYuGg_rj5AgqHhyScnfXUUfHnr"
-      RDP_PASSWORD_SECRET: ${{ secrets.RDP_PASSWORD }}
-      BOT_ZIP_URL_SECRET: ${{ secrets.BOT_ZIP_URL }} # optional secret override
+      # --- NGROK TOKEN: secret > workflow_dispatch input > hardcoded default ---
+      # To change the token: set the NGROK_AUTH_TOKEN secret in your repo settings,
+      # OR pass it as the NGROK_TOKEN input when triggering manually.
+      NGROK_AUTH_TOKEN_SECRET: ${{ secrets.NGROK_AUTH_TOKEN }}
+      NGROK_TOKEN_INPUT: ${{ github.event.inputs.NGROK_TOKEN }}
+      NGROK_TOKEN_DEFAULT: "330KohFkXadttXrqDD4xXqFYuGg_rj5AgqHhyScnfXUUfHnr"
 
-      # Raw inputs (may be empty)
+      RDP_PASSWORD_SECRET: ${{ secrets.RDP_PASSWORD }}
+      BOT_ZIP_URL_SECRET: ${{ secrets.BOT_ZIP_URL }}
+
       HOLD_MINUTES_INPUT: ${{ github.event.inputs.HOLD_MINUTES }}
       BOT_ZIP_URL_INPUT: ${{ github.event.inputs.BOT_ZIP_URL }}
       RDP_PASSWORD_INPUT: ${{ github.event.inputs.RDP_PASSWORD }}
 
-      # Hard default for bot zip (used only if neither secret nor input is set)
       BOT_ZIP_URL_DEFAULT: "https://www.dropbox.com/scl/fo/finl8oqivftlo91fmaphu/AEApbCtwKKbub_B1uDeKEXg?rlkey=4ztjd9h04dfsukww14pdujkf6&st=fi79cec2&dl=1"
 
     steps:
@@ -44,28 +54,30 @@ jobs:
           Write-Host "Runner name        : $env:RUNNER_NAME"
           Write-Host "Runner OS          : $env:RUNNER_OS"
           Write-Host "Workspace          : $env:GITHUB_WORKSPACE"
+          Write-Host "Trigger event      : $env:GITHUB_EVENT_NAME"
 
-      - name: Validate ngrok token
-        shell: pwsh
-        run: |
-          if (-not $env:NGROK_AUTH_TOKEN) { throw "Missing secret NGROK_AUTH_TOKEN" }
-          Write-Host "NGROK_AUTH_TOKEN is present."
-
-      - name: Resolve inputs/defaults
+      - name: Resolve ngrok token and all inputs/defaults
         id: resolve
         shell: pwsh
         run: |
-          # Hold minutes
+          # --- Ngrok token: secret > input > hardcoded default ---
+          $ngrokToken = $env:NGROK_AUTH_TOKEN_SECRET
+          if ([string]::IsNullOrWhiteSpace($ngrokToken)) { $ngrokToken = $env:NGROK_TOKEN_INPUT }
+          if ([string]::IsNullOrWhiteSpace($ngrokToken)) { $ngrokToken = $env:NGROK_TOKEN_DEFAULT }
+          if ([string]::IsNullOrWhiteSpace($ngrokToken)) { throw "No ngrok token found. Set NGROK_AUTH_TOKEN secret or pass NGROK_TOKEN input." }
+          Write-Host "Ngrok token resolved (masked): $($ngrokToken.Substring(0, [Math]::Min(6, $ngrokToken.Length)))..."
+
+          # --- Hold minutes ---
           $hold = $env:HOLD_MINUTES_INPUT
-          if ([string]::IsNullOrWhiteSpace($hold)) { $hold = "180" }
+          if ([string]::IsNullOrWhiteSpace($hold)) { $hold = "360" }
           if (-not ($hold -as [int])) { $hold = "360" }
 
-          # RDP password: secret > input > default
+          # --- RDP password: secret > input > default ---
           $rdp = $env:RDP_PASSWORD_SECRET
           if ([string]::IsNullOrWhiteSpace($rdp)) { $rdp = $env:RDP_PASSWORD_INPUT }
           if ([string]::IsNullOrWhiteSpace($rdp)) { $rdp = "P@ssw0rd!" }
 
-          # Bot URL: secret > input > hard default
+          # --- Bot URL: secret > input > hard default ---
           $botUrl = $env:BOT_ZIP_URL_SECRET
           if ([string]::IsNullOrWhiteSpace($botUrl)) { $botUrl = $env:BOT_ZIP_URL_INPUT }
           if ([string]::IsNullOrWhiteSpace($botUrl)) { $botUrl = $env:BOT_ZIP_URL_DEFAULT }
@@ -73,9 +85,10 @@ jobs:
           Write-Host "Effective Hold (min): $hold"
           Write-Host "Effective Bot URL   : $botUrl"
 
-          "EffectiveHoldMinutes=$hold" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "EffectiveRdpPassword=$rdp" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "EffectiveBotUrl=$botUrl"    | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "EffectiveNgrokToken=$ngrokToken"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "EffectiveHoldMinutes=$hold"        | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "EffectiveRdpPassword=$rdp"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "EffectiveBotUrl=$botUrl"           | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Download and extract ngrok (robust)
         shell: pwsh
@@ -92,7 +105,8 @@ jobs:
           }
           if (-not (Test-Path $ng)) { throw "ngrok.exe not found after extract" }
           Write-Host "ngrok path: $ng"
-          & $ng authtoken $Env:NGROK_AUTH_TOKEN
+          # Authenticate with resolved token
+          & $ng authtoken '${{ steps.resolve.outputs.EffectiveNgrokToken }}'
 
       - name: Enable Remote Desktop
         shell: pwsh
@@ -125,32 +139,22 @@ jobs:
           $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
           if (-not (Test-Path $chrome)) { $chrome = "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe" }
 
-          # Create policies to suppress first-run/default-browser prompts
           New-Item -Path "HKLM:\SOFTWARE\Policies\Google\Chrome" -Force | Out-Null
           New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Google\Chrome" -Name "SuppressFirstRunDefaultBrowserPrompt" -PropertyType DWord -Value 1 -Force | Out-Null
           New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Google\Chrome" -Name "DefaultBrowserSettingEnabled" -PropertyType DWord -Value 0 -Force | Out-Null
           New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Google\Chrome" -Name "BrowserSignin" -PropertyType DWord -Value 0 -Force | Out-Null
 
-          # Pre-create user data directories
           $userData = Join-Path $env:LOCALAPPDATA "Google\Chrome\User Data"
           $defaultProfile = Join-Path $userData "Default"
           New-Item -ItemType Directory -Force -Path $defaultProfile | Out-Null
 
-          # Seed minimal Preferences and Local State to mark clean exit and disable first run
           $prefsPath = Join-Path $defaultProfile "Preferences"
           if (-not (Test-Path $prefsPath)) {
             $prefs = @{
-              "browser" = @{
-                "has_seen_welcome_page" = true
-              }
+              "browser" = @{ "has_seen_welcome_page" = true }
               "first_run_tabs" = @()
-              "distribution" = @{
-                "skip_first_run_ui" = true
-              }
-              "profile" = @{
-                "exit_type" = "Normal"
-                "name" = "Default"
-              }
+              "distribution" = @{ "skip_first_run_ui" = true }
+              "profile" = @{ "exit_type" = "Normal"; "name" = "Default" }
             } | ConvertTo-Json -Depth 5
             $prefs | Out-File -FilePath $prefsPath -Encoding utf8 -Force
           }
@@ -158,21 +162,14 @@ jobs:
           $localStatePath = Join-Path $userData "Local State"
           if (-not (Test-Path $localStatePath)) {
             $localState = @{
-              "browser" = @{
-                "enabled_labs_experiments" = @()
-              }
-              "profile" = @{
-                "last_used" = "Default"
-              }
+              "browser" = @{ "enabled_labs_experiments" = @() }
+              "profile" = @{ "last_used" = "Default" }
             } | ConvertTo-Json -Depth 5
             $localState | Out-File -FilePath $localStatePath -Encoding utf8 -Force
           }
 
-          # Prime the profile silently in headless mode
           $args = @(
-            "--headless=new",
-            "--disable-gpu",
-            "--no-first-run",
+            "--headless=new", "--disable-gpu", "--no-first-run",
             "--no-default-browser-check",
             "--user-data-dir=""$userData""",
             "--profile-directory=""Default"""
@@ -182,12 +179,6 @@ jobs:
           Start-Process -FilePath $chrome -ArgumentList $args
           Start-Sleep -Seconds 6
           Get-Process chrome -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-
-          if (Test-Path $prefsPath) {
-            Write-Host "Chrome profile initialized with Preferences."
-          } else {
-            Write-Host "Chrome profile folder exists; Preferences file may be created at first real run."
-          }
 
       - name: Prepare Bot base directory
         shell: pwsh
@@ -272,12 +263,10 @@ jobs:
         env:
           HOLD_MINUTES: ${{ steps.resolve.outputs.EffectiveHoldMinutes }}
         run: |
-          # Resolve ngrok path
           $ngrok = Join-Path $PWD "ngrok\ngrok.exe"
           if (-not (Test-Path $ngrok)) { $ngrok = Join-Path $PWD "ngrok.exe" }
           if (-not (Test-Path $ngrok)) { throw "ngrok.exe not found" }
 
-          # Determine hold duration
           $minutes = 360
           if ($env:HOLD_MINUTES -and ($env:HOLD_MINUTES -as [int]) -gt 0) { $minutes = [int]$env:HOLD_MINUTES }
           $deadline = (Get-Date).AddMinutes($minutes)
@@ -303,3 +292,4 @@ jobs:
         shell: pwsh
         run: |
           Write-Host ("Workflow finished. Held for {0} minutes." -f '${{ steps.resolve.outputs.EffectiveHoldMinutes }}')
+          Write-Host "Next scheduled auto-restart: in ~6 hours (cron: 0 */6 * * *)"
