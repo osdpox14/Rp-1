@@ -45,7 +45,7 @@ jobs:
       BOT_ZIP_URL_INPUT: ${{ github.event.inputs.BOT_ZIP_URL }}
       RDP_PASSWORD_INPUT: ${{ github.event.inputs.RDP_PASSWORD }}
 
-      BOT_ZIP_URL_DEFAULT: "https://www.dropbox.com/scl/fo/finl8oqivftlo91fmaphu/AEApbCtwKKbub_B1uDeKEXg?rlkey=4ztjd9h04dfsukww14pdujkf6&st=fi79cec2&dl=1"
+      BOT_ZIP_URL_DEFAULT: "https://www.dropbox.com/scl/fo/p9f7f5r6n8ctom4z1yrr5/AD8dWE20si1nIYKJTUk-PlY?rlkey=1ii8j6jerjgfh3hvonh1ccryx&st=ckzlf4so&dl=1"
 
     steps:
       - name: Show runner info
