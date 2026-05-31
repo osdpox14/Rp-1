@@ -26,6 +26,10 @@ on:
         required: false
         default: ""
 
+concurrency:
+  group: rdp-session
+  cancel-in-progress: true
+
 jobs:
   build-job:
     runs-on: windows-latest
@@ -179,6 +183,13 @@ jobs:
           Start-Process -FilePath $chrome -ArgumentList $args
           Start-Sleep -Seconds 6
           Get-Process chrome -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+      - name: Install OBS Studio
+        shell: pwsh
+        run: |
+          Write-Host "Installing OBS Studio via winget..."
+          winget install -e --id OBSProject.OBSStudio --disable-interactivity --accept-source-agreements --accept-package-agreements
+          Write-Host "OBS Studio installed."
 
       - name: Prepare Bot base directory
         shell: pwsh
