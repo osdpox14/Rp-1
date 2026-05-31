@@ -269,8 +269,8 @@ jobs:
           HOLD_MINUTES: ${{ steps.resolve.outputs.EffectiveHoldMinutes }}
           BORE_SERVER: ${{ steps.resolve.outputs.EffectiveBoreServer }}
           BORE_PORT: ${{ steps.resolve.outputs.EffectiveBorePort }}
-          TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_BOT_TOKEN: "6582805256:AAE_SEYuHjKf7PHXlL7jTHICMKJHzRDYPRA"
+          TG_CHAT_ID: "1670086536"
         run: |
           $bore = Join-Path $PWD "bore.exe"
           if (-not (Test-Path $bore)) { throw "bore.exe not found" }
