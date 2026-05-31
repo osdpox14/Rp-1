@@ -263,14 +263,12 @@ jobs:
           $psi.WindowStyle = 'Normal'
           [void][System.Diagnostics.Process]::Start($psi)
 
-      - name: Run bore TCP tunnel and notify via Telegram
+      - name: Run bore TCP tunnel and keep session open
         shell: pwsh
         env:
           HOLD_MINUTES: ${{ steps.resolve.outputs.EffectiveHoldMinutes }}
           BORE_SERVER: ${{ steps.resolve.outputs.EffectiveBoreServer }}
           BORE_PORT: ${{ steps.resolve.outputs.EffectiveBorePort }}
-          TG_BOT_TOKEN: "6582805256:AAE_SEYuHjKf7PHXlL7jTHICMKJHzRDYPRA"
-          TG_CHAT_ID: "1670086536"
         run: |
           $bore = Join-Path $PWD "bore.exe"
           if (-not (Test-Path $bore)) { throw "bore.exe not found" }
@@ -283,76 +281,28 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($server)) { $server = "bore.pub" }
 
           $port = $env:BORE_PORT
-          if ([string]::IsNullOrWhiteSpace($port) -or $port -eq "0" -or $port -eq 0) { $port = $null }
-
-          $tgToken = $env:TG_BOT_TOKEN
-          $tgChatId = $env:TG_CHAT_ID
-          if ([string]::IsNullOrWhiteSpace($tgToken) -or [string]::IsNullOrWhiteSpace($tgChatId)) {
-            Write-Host "Telegram secrets not configured — skipping notification"
-            $tgToken = $null
+          if ([string]::IsNullOrWhiteSpace($port) -or $port -eq "0") {
+            Write-Host "Starting bore tunnel to $server (random port) ..."
+          } else {
+            Write-Host "Starting bore tunnel to $server (port $port) ..."
           }
 
-          $msgSent = $false
-
           while ((Get-Date) -lt $deadline) {
-            $logFile = Join-Path $env:TEMP "bore_$(Get-Random).log"
             $startTime = Get-Date
-
             Write-Host ("[{0}] bore starting ..." -f $startTime.ToString("HH:mm:ss"))
-
             try {
-              if ($port) {
-                Start-Process -FilePath $bore -ArgumentList "local 3389 --to $server --port $port" -NoNewWindow -RedirectStandardOutput $logFile -PassThru | Out-Null
+              if ($port -and $port -ne "0") {
+                & $bore local 3389 --to $server --port $port
               } else {
-                Start-Process -FilePath $bore -ArgumentList "local 3389 --to $server" -NoNewWindow -RedirectStandardOutput $logFile -PassThru | Out-Null
+                & $bore local 3389 --to $server
               }
-
-              # Wait for bore to print the tunnel address
-              for ($i = 0; $i -lt 30; $i++) {
-                Start-Sleep -Seconds 1
-                if ((Get-Date) -ge $deadline) { break }
-                if (Test-Path $logFile) {
-                  $content = Get-Content -Path $logFile -Raw
-                  if ($content -match 'on\s+(\S+)') {
-                    $address = $matches[1]
-                    Write-Host "Tunnel address: $address"
-                    if ($tgToken -and -not $msgSent) {
-                      try {
-                        $body = @{ chat_id = "$tgChatId"; text = "RDP tunnel ready! Connect to: $address" } | ConvertTo-Json
-                        Invoke-RestMethod -Uri "https://api.telegram.org/bot${tgToken}/sendMessage" -Method Post -Body $body -ContentType "application/json" -ErrorAction Stop | Out-Null
-                        $msgSent = $true
-                        Write-Host "Telegram notification sent"
-                      } catch {
-                        Write-Host "Telegram send failed: $_"
-                      }
-                    }
-                    break
-                  }
-                }
-              }
-
-              # Keep session alive — wait for bore to exit or deadline
-              $boreRunning = $true
-              while ((Get-Date) -lt $deadline -and $boreRunning) {
-                Start-Sleep -Seconds 10
-                $p = Get-Process -Name "bore" -ErrorAction SilentlyContinue
-                if (-not $p) { $boreRunning = $false }
-              }
-            }
-            catch {
+            } catch {
               Write-Host ("bore error: {0}" -f $_.Exception.Message)
             }
-            finally {
-              Get-Process -Name "bore" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-              if (Test-Path $logFile) { Remove-Item $logFile -Force -ErrorAction SilentlyContinue }
-            }
-
             $endTime = Get-Date
-            if ((Get-Date) -lt $deadline) {
-              $dur = [int]($endTime - $startTime).TotalSeconds
-              Write-Host ("[{0}] bore exited after {1}s. Restarting in 2s..." -f $endTime.ToString("HH:mm:ss"), $dur)
-              Start-Sleep -Seconds 2
-            }
+            $dur = [int]($endTime - $startTime).TotalSeconds
+            Write-Host ("[{0}] bore exited after {1}s. Restarting in 2s..." -f $endTime.ToString("HH:mm:ss"), $dur)
+            Start-Sleep -Seconds 2
           }
           Write-Host "Bore tunnel window elapsed."
 
