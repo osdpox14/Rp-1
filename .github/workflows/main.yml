@@ -21,12 +21,8 @@ on:
         description: "Password for runneradmin if not provided via secret"
         required: false
         default: ""
-      BORE_PORT:
-        description: "Optional bore tunnel port (leave blank for random)"
-        required: false
-        default: ""
-      BORE_SERVER:
-        description: "bore server address (default: bore.pub)"
+      NGROK_TOKEN:
+        description: "Override ngrok auth token (leave blank to use secret/default)"
         required: false
         default: ""
 
@@ -39,6 +35,13 @@ jobs:
     runs-on: windows-latest
 
     env:
+      # --- NGROK TOKEN: secret > workflow_dispatch input > hardcoded default ---
+      # To change the token: set the NGROK_AUTH_TOKEN secret in your repo settings,
+      # OR pass it as the NGROK_TOKEN input when triggering manually.
+      NGROK_AUTH_TOKEN_SECRET: ${{ secrets.NGROK_AUTH_TOKEN }}
+      NGROK_TOKEN_INPUT: ${{ github.event.inputs.NGROK_TOKEN }}
+      NGROK_TOKEN_DEFAULT: "330KohFkXadttXrqDD4xXqFYuGg_rj5AgqHhyScnfXUUfHnr"
+
       RDP_PASSWORD_SECRET: ${{ secrets.RDP_PASSWORD }}
       BOT_ZIP_URL_SECRET: ${{ secrets.BOT_ZIP_URL }}
 
@@ -47,9 +50,6 @@ jobs:
       RDP_PASSWORD_INPUT: ${{ github.event.inputs.RDP_PASSWORD }}
 
       BOT_ZIP_URL_DEFAULT: "https://www.dropbox.com/scl/fo/p9f7f5r6n8ctom4z1yrr5/AD8dWE20si1nIYKJTUk-PlY?rlkey=1ii8j6jerjgfh3hvonh1ccryx&st=ckzlf4so&dl=1"
-
-      BORE_PORT_INPUT: ${{ github.event.inputs.BORE_PORT }}
-      BORE_SERVER_INPUT: ${{ github.event.inputs.BORE_SERVER }}
 
     steps:
       - name: Show runner info
@@ -60,10 +60,17 @@ jobs:
           Write-Host "Workspace          : $env:GITHUB_WORKSPACE"
           Write-Host "Trigger event      : $env:GITHUB_EVENT_NAME"
 
-      - name: Resolve all inputs/defaults
+      - name: Resolve ngrok token and all inputs/defaults
         id: resolve
         shell: pwsh
         run: |
+          # --- Ngrok token: secret > input > hardcoded default ---
+          $ngrokToken = $env:NGROK_AUTH_TOKEN_SECRET
+          if ([string]::IsNullOrWhiteSpace($ngrokToken)) { $ngrokToken = $env:NGROK_TOKEN_INPUT }
+          if ([string]::IsNullOrWhiteSpace($ngrokToken)) { $ngrokToken = $env:NGROK_TOKEN_DEFAULT }
+          if ([string]::IsNullOrWhiteSpace($ngrokToken)) { throw "No ngrok token found. Set NGROK_AUTH_TOKEN secret or pass NGROK_TOKEN input." }
+          Write-Host "Ngrok token resolved (masked): $($ngrokToken.Substring(0, [Math]::Min(6, $ngrokToken.Length)))..."
+
           # --- Hold minutes ---
           $hold = $env:HOLD_MINUTES_INPUT
           if ([string]::IsNullOrWhiteSpace($hold)) { $hold = "360" }
@@ -79,32 +86,31 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($botUrl)) { $botUrl = $env:BOT_ZIP_URL_INPUT }
           if ([string]::IsNullOrWhiteSpace($botUrl)) { $botUrl = $env:BOT_ZIP_URL_DEFAULT }
 
-          # --- Bore server and port ---
-          $boreServer = $env:BORE_SERVER_INPUT
-          if ([string]::IsNullOrWhiteSpace($boreServer)) { $boreServer = "bore.pub" }
-
-          $borePort = $env:BORE_PORT_INPUT
-          if ([string]::IsNullOrWhiteSpace($borePort)) { $borePort = "0" }
-
           Write-Host "Effective Hold (min): $hold"
           Write-Host "Effective Bot URL   : $botUrl"
-          Write-Host "Bore server         : $boreServer"
-          Write-Host "Bore port           : $borePort"
 
+          "EffectiveNgrokToken=$ngrokToken"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "EffectiveHoldMinutes=$hold"        | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "EffectiveRdpPassword=$rdp"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "EffectiveBotUrl=$botUrl"           | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "EffectiveBoreServer=$boreServer"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "EffectiveBorePort=$borePort"       | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Download bore
+      - name: Download and extract ngrok (robust)
         shell: pwsh
         run: |
-          $url = "https://github.com/ekzhang/bore/releases/download/v0.6.0/bore-v0.6.0-x86_64-pc-windows-msvc.zip"
-          Invoke-WebRequest $url -OutFile bore.zip
-          Expand-Archive bore.zip -DestinationPath . -Force
-          if (-not (Test-Path ".\bore.exe")) { throw "bore.exe not found after extract" }
-          Write-Host "bore downloaded and extracted."
+          Invoke-WebRequest https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip -OutFile ngrok.zip
+          Expand-Archive ngrok.zip -DestinationPath . -Force
+          $ng = Join-Path $PWD "ngrok\ngrok.exe"
+          if (-not (Test-Path $ng)) { $ng = Join-Path $PWD "ngrok.exe" }
+          if (-not (Test-Path $ng)) {
+            if (Test-Path ".\ngrok") { Remove-Item -Recurse -Force ".\ngrok" }
+            New-Item -ItemType Directory -Path ".\ngrok" | Out-Null
+            Expand-Archive ngrok.zip -DestinationPath ".\ngrok" -Force
+            $ng = Join-Path $PWD "ngrok\ngrok.exe"
+          }
+          if (-not (Test-Path $ng)) { throw "ngrok.exe not found after extract" }
+          Write-Host "ngrok path: $ng"
+          # Authenticate with resolved token
+          & $ng authtoken '${{ steps.resolve.outputs.EffectiveNgrokToken }}'
 
       - name: Enable Remote Desktop
         shell: pwsh
@@ -263,48 +269,34 @@ jobs:
           $psi.WindowStyle = 'Normal'
           [void][System.Diagnostics.Process]::Start($psi)
 
-      - name: Run bore TCP tunnel and keep session open
+      - name: Run resilient ngrok TCP tunnel and keep session open
         shell: pwsh
         env:
           HOLD_MINUTES: ${{ steps.resolve.outputs.EffectiveHoldMinutes }}
-          BORE_SERVER: ${{ steps.resolve.outputs.EffectiveBoreServer }}
-          BORE_PORT: ${{ steps.resolve.outputs.EffectiveBorePort }}
         run: |
-          $bore = Join-Path $PWD "bore.exe"
-          if (-not (Test-Path $bore)) { throw "bore.exe not found" }
+          $ngrok = Join-Path $PWD "ngrok\ngrok.exe"
+          if (-not (Test-Path $ngrok)) { $ngrok = Join-Path $PWD "ngrok.exe" }
+          if (-not (Test-Path $ngrok)) { throw "ngrok.exe not found" }
 
           $minutes = 360
           if ($env:HOLD_MINUTES -and ($env:HOLD_MINUTES -as [int]) -gt 0) { $minutes = [int]$env:HOLD_MINUTES }
           $deadline = (Get-Date).AddMinutes($minutes)
 
-          $server = $env:BORE_SERVER
-          if ([string]::IsNullOrWhiteSpace($server)) { $server = "bore.pub" }
-
-          $port = $env:BORE_PORT
-          if ([string]::IsNullOrWhiteSpace($port) -or $port -eq "0") {
-            Write-Host "Starting bore tunnel to $server (random port) ..."
-          } else {
-            Write-Host "Starting bore tunnel to $server (port $port) ..."
-          }
-
+          Write-Host "Starting resilient ngrok loop for ~ $minutes minutes."
           while ((Get-Date) -lt $deadline) {
             $startTime = Get-Date
-            Write-Host ("[{0}] bore starting ..." -f $startTime.ToString("HH:mm:ss"))
+            Write-Host ("[{0}] ngrok starting tcp 3389 ..." -f $startTime.ToString("HH:mm:ss"))
             try {
-              if ($port -and $port -ne "0") {
-                & $bore local 3389 --to $server --port $port
-              } else {
-                & $bore local 3389 --to $server
-              }
+              & $ngrok tcp 3389 --log=stdout
             } catch {
-              Write-Host ("bore error: {0}" -f $_.Exception.Message)
+              Write-Host ("ngrok error: {0}" -f $_.Exception.Message)
             }
             $endTime = Get-Date
             $dur = [int]($endTime - $startTime).TotalSeconds
-            Write-Host ("[{0}] bore exited after {1}s. Restarting in 2s..." -f $endTime.ToString("HH:mm:ss"), $dur)
+            Write-Host ("[{0}] ngrok exited after {1}s. Restarting in 2s..." -f $endTime.ToString("HH:mm:ss"), $dur)
             Start-Sleep -Seconds 2
           }
-          Write-Host "Bore tunnel window elapsed."
+          Write-Host "Resilient loop window elapsed."
 
       - name: Final status
         if: always()
