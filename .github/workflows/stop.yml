@@ -1,0 +1,22 @@
+name: Stop RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  stop:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel all running RDP sessions
+        shell: pwsh
+        run: |
+          Write-Host "Looking for running main.yml workflows..."
+          gh run list --workflow main.yml --limit 20 --json databaseId,status `
+            --jq '.[] | select(.status == "in_progress" or .status == "queued") | .databaseId' `
+            | ForEach-Object {
+              Write-Host "Cancelling run $_ ..."
+              gh run cancel $_
+            }
+          Write-Host "Done."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
