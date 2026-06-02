@@ -289,66 +289,105 @@ jobs:
           $tgToken = $env:TG_BOT_TOKEN
           $tgChatId = $env:TG_CHAT_ID
           if ([string]::IsNullOrWhiteSpace($tgToken) -or [string]::IsNullOrWhiteSpace($tgChatId)) {
-            Write-Host "Telegram secrets not configured — skipping notification"
+            Write-Host "Telegram notification disabled"
             $tgToken = $null
           }
 
           $msgSent = $false
 
           while ((Get-Date) -lt $deadline) {
-            $logFile = Join-Path $env:TEMP "bore_$(Get-Random).log"
             $startTime = Get-Date
-
             Write-Host ("[{0}] bore starting ..." -f $startTime.ToString("HH:mm:ss"))
 
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $bore
+            $psi.Arguments = "local 3389 --to $server"
+            if ($port) { $psi.Arguments += " --port $port" }
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+
             try {
-              if ($port) {
-                Start-Process -FilePath $bore -ArgumentList "local 3389 --to $server --port $port" -NoNewWindow -RedirectStandardOutput $logFile -PassThru | Out-Null
-              } else {
-                Start-Process -FilePath $bore -ArgumentList "local 3389 --to $server" -NoNewWindow -RedirectStandardOutput $logFile -PassThru | Out-Null
+              $proc = New-Object System.Diagnostics.Process
+              $proc.StartInfo = $psi
+              if (-not $proc.Start()) { throw "Failed to start bore process" }
+              Write-Host "bore PID: $($proc.Id)"
+
+              $address = $null
+              $found = $false
+              $timeout = (Get-Date).AddSeconds(30)
+
+              while ((Get-Date) -lt $timeout -and (Get-Date) -lt $deadline -and -not $found) {
+                $line = $proc.StandardOutput.ReadLine()
+                if ($line -ne $null) {
+                  Write-Host "bore: $line"
+                  if ($line -match '(?:on|at)\s+(\S+)') {
+                    $address = $matches[1]
+                    $found = $true
+                  }
+                } elseif ($proc.HasExited) {
+                  break
+                } else {
+                  Start-Sleep -Milliseconds 200
+                }
               }
 
-              # Wait for bore to print the tunnel address
-              for ($i = 0; $i -lt 30; $i++) {
-                Start-Sleep -Seconds 1
-                if ((Get-Date) -ge $deadline) { break }
-                if (Test-Path $logFile) {
-                  $content = Get-Content -Path $logFile -Raw
-                    if ($content -match 'on\s+(\S+)') {
+              # Also read buffered stdout
+              if (-not $found) {
+                $rest = $proc.StandardOutput.ReadToEnd()
+                if ($rest) {
+                  Write-Host "bore extra: $rest"
+                  if ($rest -match '(?:on|at)\s+(\S+)') {
                     $address = $matches[1]
-                    Write-Host "Tunnel address: $address"
-                    # Show in GitHub Actions summary
-                    "## Bore Tunnel Address" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-                    "The RDP tunnel is ready! Connect to: **$address**" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-                    if ($tgToken -and -not $msgSent) {
-                      try {
-                        $body = @{ chat_id = "$tgChatId"; text = "RDP tunnel ready! Connect to: $address" } | ConvertTo-Json
-                        Invoke-RestMethod -Uri "https://api.telegram.org/bot${tgToken}/sendMessage" -Method Post -Body $body -ContentType "application/json" -ErrorAction Stop | Out-Null
-                        $msgSent = $true
-                        Write-Host "Telegram notification sent"
-                      } catch {
-                        Write-Host "Telegram send failed: $_"
-                      }
-                    }
-                    break
+                    $found = $true
                   }
                 }
               }
 
-              # Keep session alive — wait for bore to exit or deadline
-              $boreRunning = $true
-              while ((Get-Date) -lt $deadline -and $boreRunning) {
-                Start-Sleep -Seconds 10
-                $p = Get-Process -Name "bore" -ErrorAction SilentlyContinue
-                if (-not $p) { $boreRunning = $false }
+              # Check stderr if still not found
+              if (-not $found) {
+                $err = $proc.StandardError.ReadToEnd()
+                if ($err) {
+                  Write-Host "bore stderr: $err"
+                  if ($err -match '(?:on|at)\s+(\S+)') {
+                    $address = $matches[1]
+                    $found = $true
+                  }
+                }
               }
+
+              if ($found) {
+                Write-Host "Tunnel address: $address"
+                "## Bore Tunnel Address" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+                "The RDP tunnel is ready! Connect to: **$address**" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+                if ($tgToken -and -not $msgSent) {
+                  try {
+                    $body = @{ chat_id = "$tgChatId"; text = "RDP tunnel ready! Connect to: $address" } | ConvertTo-Json
+                    Invoke-RestMethod -Uri "https://api.telegram.org/bot${tgToken}/sendMessage" -Method Post -Body $body -ContentType "application/json" -ErrorAction Stop | Out-Null
+                    $msgSent = $true
+                    Write-Host "Telegram notification sent"
+                  } catch {
+                    Write-Host "Telegram send failed: $_"
+                  }
+                }
+              } else {
+                Write-Host "bore address not found in output after 30s"
+              }
+
+              # Wait for bore to exit or deadline
+              while ((Get-Date) -lt $deadline -and -not $proc.HasExited) {
+                Start-Sleep -Seconds 5
+              }
+              if (-not $proc.HasExited) { $proc.Kill() }
             }
             catch {
               Write-Host ("bore error: {0}" -f $_.Exception.Message)
             }
             finally {
+              if ($proc -and -not $proc.HasExited) { $proc.Kill() }
+              if ($proc) { $proc.Dispose() }
               Get-Process -Name "bore" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-              if (Test-Path $logFile) { Remove-Item $logFile -Force -ErrorAction SilentlyContinue }
             }
 
             $endTime = Get-Date
