@@ -47,7 +47,7 @@ jobs:
       BOT_ZIP_URL_INPUT: ${{ github.event.inputs.BOT_ZIP_URL }}
       RDP_PASSWORD_INPUT: ${{ github.event.inputs.RDP_PASSWORD }}
 
-      BOT_ZIP_URL_DEFAULT: "https://www.dropbox.com/scl/fi/m5mln2yppga9f01g8xfsr/BOT-python.zip?rlkey=t5iqdqau6ea5cq0tt1bwuzfpb&st=blkhggz9&dl=1"
+      BOT_ZIP_URL_DEFAULT: "https://www.dropbox.com/scl/fi/m5mln2yppga9f01g8xfsr/BOT.zip?rlkey=t5iqdqau6ea5cq0tt1bwuzfpb&st=ug4xgfho&dl=1"
 
       BORE_PORT_INPUT: ${{ github.event.inputs.BORE_PORT }}
       BORE_SERVER_INPUT: ${{ github.event.inputs.BORE_SERVER }}
